@@ -27,6 +27,8 @@ MessageItemType = Literal[
 ]
 
 ApplicationMode = Literal["enforced_by_rule_engine", "future_rule"]
+ModelRole = Literal["intake", "work"]
+ModelProvider = Literal["openai", "deepseek"]
 RuleStatus = Literal["candidate", "active", "future", "revoked"]
 RuleReviewState = Literal["pending", "confirmed", "rejected"]
 RuleConflictState = Literal["none", "unresolved", "resolved"]
@@ -230,6 +232,30 @@ class QueryProgramContract:
     future_rules: tuple[AgentRule, ...] = ()
     pending_candidates: tuple[RuleCandidate, ...] = ()
     policies: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRoute:
+    """Contract: one provider/model target for a specific model role route."""
+
+    provider: ModelProvider
+    model: str
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRoutePair:
+    """Contract: one primary and one fallback route for a model role."""
+
+    primary: ModelRoute
+    fallback: ModelRoute
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRoutingConfig:
+    """Contract: full routing config for intake and work model roles."""
+
+    intake: ModelRoutePair
+    work: ModelRoutePair
 
 
 @dataclass(frozen=True, slots=True)

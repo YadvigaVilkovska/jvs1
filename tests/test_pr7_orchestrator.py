@@ -117,6 +117,34 @@ def test_orchestrator_runs_preprocessor_before_classifier() -> None:
     assert result.episode.state == "cancelled"
 
 
+def test_orchestrator_confirmation_flow_not_bypassed() -> None:
+    classifier = StubClassifier(
+        default_result=IntakeResult(
+            message_id="m1",
+            primary_intent="rule_update",
+            items=(
+                MessageItem(
+                    type="rule_candidate",
+                    text="Показывай понимание",
+                    scope="all_tasks",
+                    key="show_understanding_before_execution",
+                ),
+            ),
+        )
+    )
+    orchestrator, program_service, _, _, _, _ = build_orchestrator(classifier)
+    active_version = build_active_program_version(program_service)
+
+    result = orchestrator.handle_message(
+        build_episode(),
+        build_message("/rule Показывай понимание"),
+        active_version,
+    )
+
+    assert result.program_version == active_version
+    assert result.episode.state == "pending_rule_review"
+
+
 def test_orchestrator_cancel_message_cancels_episode() -> None:
     classifier = StubClassifier(default_result=IntakeResult(message_id="m1", primary_intent="chat", items=()))
     orchestrator, program_service, _, _, _, _ = build_orchestrator(classifier)

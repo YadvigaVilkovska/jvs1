@@ -14,6 +14,9 @@ from jeeves_dap.domain.models import (
     EvidenceEvent,
     IntakeResult,
     MessageItem,
+    ModelRoute,
+    ModelRoutePair,
+    ModelRoutingConfig,
     PendingUnderstanding,
     PendingSwitchDecision,
     QueryProgramContract,
@@ -72,6 +75,11 @@ from jeeves_dap.services.deterministic_preprocessor import (
     DeterministicPreProcessor,
     PreprocessResult,
 )
+from jeeves_dap.services.model_routing import (
+    ModelRouter,
+    build_default_model_routing_config,
+    build_model_routing_config_from_env,
+)
 from jeeves_dap.services.pending_switch_service import PendingSwitchService
 from jeeves_dap.services.orchestrator import Orchestrator, OrchestratorTurnResult
 from jeeves_dap.services.rule_engine import RuleEngine
@@ -103,6 +111,10 @@ __all__ = [
     "ItemValidationResult",
     "KNOWN_RULE_KEYS",
     "MessageItem",
+    "ModelRoute",
+    "ModelRoutePair",
+    "ModelRouter",
+    "ModelRoutingConfig",
     "Orchestrator",
     "OrchestratorTurnResult",
     "PendingUnderstanding",
@@ -129,6 +141,8 @@ __all__ = [
     "VerifierStub",
     "app",
     "build_default_agent_program_v1",
+    "build_default_model_routing_config",
+    "build_model_routing_config_from_env",
     "CANCEL_COMMANDS",
     "CONFIRM_COMMANDS",
     "compute_understanding_sufficiency",

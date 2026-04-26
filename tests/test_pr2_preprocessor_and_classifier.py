@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC
+from pathlib import Path
 from typing import get_type_hints
+import inspect
 
 from jeeves_dap.domain.models import IntakeResult, MessageItem
 from jeeves_dap.services.classification import DevCommandClassifier, IntentClassifier, StubClassifier
@@ -12,6 +14,11 @@ from jeeves_dap.services.deterministic_preprocessor import (
     CONFIRM_COMMANDS,
     REJECT_COMMANDS,
     DeterministicPreProcessor,
+)
+from jeeves_dap.services.model_routing import (
+    ModelRouter,
+    build_default_model_routing_config,
+    build_model_routing_config_from_env,
 )
 
 
@@ -222,3 +229,122 @@ def test_dev_classifier_plain_text_is_chat() -> None:
 def test_no_production_keyword_semantic_router() -> None:
     assert "LLMClassifier" not in globals()
     assert "KeywordClassifier" not in globals()
+
+
+def test_default_intake_primary_is_openai_gpt_4o_mini() -> None:
+    config = build_default_model_routing_config()
+
+    assert config.intake.primary.provider == "openai"
+    assert config.intake.primary.model == "gpt-4o-mini"
+
+
+def test_default_intake_fallback_is_deepseek_chat() -> None:
+    config = build_default_model_routing_config()
+
+    assert config.intake.fallback.provider == "deepseek"
+    assert config.intake.fallback.model == "deepseek-chat"
+
+
+def test_default_work_primary_is_deepseek_reasoner() -> None:
+    config = build_default_model_routing_config()
+
+    assert config.work.primary.provider == "deepseek"
+    assert config.work.primary.model == "deepseek-reasoner"
+
+
+def test_default_work_fallback_is_openai_gpt_5_5() -> None:
+    config = build_default_model_routing_config()
+
+    assert config.work.fallback.provider == "openai"
+    assert config.work.fallback.model == "gpt-5.5"
+
+
+def test_model_router_returns_primary_and_fallback_for_intake() -> None:
+    router = ModelRouter(build_default_model_routing_config())
+
+    route = router.get_route("intake")
+
+    assert route.primary.provider == "openai"
+    assert route.primary.model == "gpt-4o-mini"
+    assert route.fallback.provider == "deepseek"
+    assert route.fallback.model == "deepseek-chat"
+
+
+def test_model_router_returns_primary_and_fallback_for_work() -> None:
+    router = ModelRouter(build_default_model_routing_config())
+
+    route = router.get_route("work")
+
+    assert route.primary.provider == "deepseek"
+    assert route.primary.model == "deepseek-reasoner"
+    assert route.fallback.provider == "openai"
+    assert route.fallback.model == "gpt-5.5"
+
+
+def test_environment_overrides_intake_route() -> None:
+    config = build_model_routing_config_from_env(
+        {
+            "INTAKE_PRIMARY_PROVIDER": "deepseek",
+            "INTAKE_PRIMARY_MODEL": "deepseek-chat",
+            "INTAKE_FALLBACK_PROVIDER": "openai",
+            "INTAKE_FALLBACK_MODEL": "gpt-5.5",
+        }
+    )
+
+    assert config.intake.primary.provider == "deepseek"
+    assert config.intake.primary.model == "deepseek-chat"
+    assert config.intake.fallback.provider == "openai"
+    assert config.intake.fallback.model == "gpt-5.5"
+
+
+def test_environment_overrides_work_route() -> None:
+    config = build_model_routing_config_from_env(
+        {
+            "WORK_PRIMARY_PROVIDER": "openai",
+            "WORK_PRIMARY_MODEL": "gpt-4o-mini",
+            "WORK_FALLBACK_PROVIDER": "deepseek",
+            "WORK_FALLBACK_MODEL": "deepseek-chat",
+        }
+    )
+
+    assert config.work.primary.provider == "openai"
+    assert config.work.primary.model == "gpt-4o-mini"
+    assert config.work.fallback.provider == "deepseek"
+    assert config.work.fallback.model == "deepseek-chat"
+
+
+def test_router_rejects_unknown_role_or_invalid_provider_if_applicable() -> None:
+    router = ModelRouter(build_default_model_routing_config())
+
+    try:
+        router.get_route("unknown")
+    except ValueError as error:
+        assert "Unknown model role" in str(error)
+    else:
+        raise AssertionError("Expected ValueError for unknown role")
+
+    try:
+        build_model_routing_config_from_env({"INTAKE_PRIMARY_PROVIDER": "invalid"})
+    except ValueError as error:
+        assert "Unsupported provider" in str(error)
+    else:
+        raise AssertionError("Expected ValueError for invalid provider")
+
+
+def test_no_real_llm_api_calls_are_made() -> None:
+    source = Path("src/jeeves_dap/services/model_routing.py").read_text(encoding="utf-8")
+
+    assert "requests" not in source
+    assert "httpx" not in source
+    assert "OpenAI" not in source
+    assert "AsyncOpenAI" not in source
+    assert "DeepSeek" not in source
+
+
+def test_existing_dev_command_classifier_still_works() -> None:
+    classifier = DevCommandClassifier()
+
+    result = classifier.classify("/task Проверить код", "open")
+
+    assert result.primary_intent == "task"
+    assert result.items == (MessageItem(type="task", text="Проверить код"),)
