@@ -410,7 +410,28 @@ def test_api_response_is_json_serializable() -> None:
     payload = response.json()
     assert isinstance(payload, dict)
     assert payload["runtime_result"]["status"] == "completed"
+    assert payload["runtime_result"]["execution_mode"] == "stub"
+    assert payload["runtime_result"]["did_execute_real_work"] is False
     assert payload["runtime_result"]["verification_result"]["verified"] is True
+
+
+def test_api_runtime_result_exposes_stub_execution_mode() -> None:
+    classifier = StubClassifier(
+        default_result=IntakeResult(
+            message_id="m1",
+            primary_intent="task",
+            items=(MessageItem(type="task", text="Проверить код"),),
+        )
+    )
+    client = TestClient(create_app(classifier=classifier))
+    episode_id = create_episode_and_return_id(client)
+
+    response = client.post("/api/turns", json={"episode_id": episode_id, "text": "Проверить код"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["runtime_result"]["execution_mode"] == "stub"
+    assert payload["runtime_result"]["did_execute_real_work"] is False
 
 
 def test_serialize_value_handles_tuple_and_list() -> None:
@@ -542,3 +563,39 @@ def test_api_manual_flow_rule_then_task_then_da_executes_runtime() -> None:
     assert confirm_payload["episode_state"] == "open"
     assert confirm_payload["runtime_result"] is not None
     assert confirm_payload["runtime_result"]["status"] == "completed"
+    assert confirm_payload["runtime_result"]["execution_mode"] == "stub"
+    assert confirm_payload["runtime_result"]["did_execute_real_work"] is False
+    assert "stub-результат" in confirm_payload["assistant_response"]
+
+
+def test_api_manual_flow_returns_stub_honest_result() -> None:
+    client = TestClient(create_app())
+    episode_id = create_episode_and_return_id(client)
+
+    client.post("/api/turns", json={"episode_id": episode_id, "text": "/rule Показывай понимание"})
+    client.post("/api/turns", json={"episode_id": episode_id, "text": "да"})
+    client.post("/api/turns", json={"episode_id": episode_id, "text": "/task Проверить код"})
+    confirm_understanding_response = client.post("/api/turns", json={"episode_id": episode_id, "text": "да"})
+
+    assert confirm_understanding_response.status_code == 200
+    payload = confirm_understanding_response.json()
+    assert payload["runtime_result"]["execution_mode"] == "stub"
+    assert payload["runtime_result"]["did_execute_real_work"] is False
+    assert "stub-результат" in payload["assistant_response"]
+
+
+def test_no_ui_buttons_added() -> None:
+    client = TestClient(create_app())
+
+    response = client.get("/")
+    html = response.text.lower()
+
+    assert "<button" not in html
+
+
+def test_no_llm_or_keyword_router_added() -> None:
+    with open("src/jeeves_dap/api.py", encoding="utf-8") as file:
+        source = file.read()
+
+    assert "LLMClassifier" not in source
+    assert "KeywordClassifier" not in source

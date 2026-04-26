@@ -6,7 +6,10 @@ from jeeves_dap.domain.models import AgentProgram, RuntimeResult, RuntimeTask
 from jeeves_dap.services.rule_engine import RuleEngine
 from jeeves_dap.services.verifier_stub import VerifierStub
 
-STUB_RESULT_TEXT = "Фиктивный результат выполнения задачи."
+STUB_RESULT_TEXT = (
+    "Это stub-результат: реальное выполнение задачи не запускалось. "
+    "Система только показала симулированный результат MVP."
+)
 SHOW_UNDERSTANDING_RULE = "show_understanding_before_execution"
 
 
@@ -42,6 +45,8 @@ class TaskRuntimeStub:
         return RuntimeResult(
             task_id=task.id,
             status=status,
+            execution_mode="stub",
+            did_execute_real_work=False,
             result_text=STUB_RESULT_TEXT,
             applied_rules=applied_rules,
             runtime_plan=runtime_plan,

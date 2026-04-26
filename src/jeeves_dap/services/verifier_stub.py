@@ -14,7 +14,7 @@ class VerifierStub:
         checked_success_condition = (
             task.success_condition
             if task.success_condition is not None
-            else f"Пользователь получил результат по запросу: {task.goal}"
+            else f"Пользователь получил stub-результат без реального выполнения: {task.goal}"
         )
 
         return VerificationResult(

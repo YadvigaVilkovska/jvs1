@@ -283,6 +283,8 @@ class RuntimeResult:
 
     task_id: str
     status: str
+    execution_mode: Literal["stub"]
+    did_execute_real_work: bool
     result_text: str
     applied_rules: tuple[str, ...]
     runtime_plan: RuntimePlan

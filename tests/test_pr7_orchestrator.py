@@ -779,6 +779,30 @@ def test_task_executes_immediately_when_show_understanding_rule_inactive() -> No
     assert result.runtime_result is not None
     assert result.episode.state == "open"
     assert pending_repository.get_by_episode_id("e1") is None
+    assert result.runtime_result.execution_mode == "stub"
+    assert result.runtime_result.did_execute_real_work is False
+    assert "stub-результат" in result.assistant_response
+
+
+def test_orchestrator_task_response_does_not_claim_real_execution() -> None:
+    classifier = StubClassifier(
+        default_result=IntakeResult(
+            message_id="m1",
+            primary_intent="task",
+            items=(MessageItem(type="task", text="Проверить код"),),
+        )
+    )
+    orchestrator, program_service, _, _, _, _ = build_orchestrator(classifier)
+
+    result = orchestrator.handle_message(
+        build_episode(),
+        build_message("/task Проверить код"),
+        build_active_program_version(program_service),
+    )
+
+    assert result.runtime_result is not None
+    assert "stub-результат" in result.assistant_response
+    assert "реальное выполнение задачи не запускалось" in result.assistant_response
 
 
 def test_task_with_show_understanding_rule_creates_pending_understanding() -> None:
@@ -953,6 +977,47 @@ def test_confirm_pending_understanding_executes_runtime() -> None:
 
     assert result.runtime_result is not None
     assert result.runtime_result.status == "completed"
+    assert result.runtime_result.execution_mode == "stub"
+    assert result.runtime_result.did_execute_real_work is False
+
+
+def test_pending_understanding_confirm_returns_stub_honest_runtime_result() -> None:
+    classifier = StubClassifier(
+        default_result=IntakeResult(
+            message_id="m1",
+            primary_intent="task",
+            items=(MessageItem(type="task", text="Проверить код"),),
+        )
+    )
+    orchestrator, program_service, _, _, _, _ = build_orchestrator(classifier)
+    active_version = build_active_program_version(program_service)
+    candidate = program_service.create_rule_candidate(
+        candidate_id="c1",
+        source_message_id="m0",
+        source_episode_id="e1",
+        text="Показывай понимание",
+        key="show_understanding_before_execution",
+        scope="all_tasks",
+    )
+    patched_version = program_service.confirm_rule_candidate(
+        active_version=active_version,
+        candidate=candidate,
+        new_version_id="v2",
+        new_rule_id="r1",
+        created_at=datetime.now(UTC),
+    )
+    orchestrator.handle_message(build_episode(), build_message("/task Проверить код"), patched_version)
+
+    result = orchestrator.handle_message(
+        build_episode("pending_understanding_review"),
+        build_message("да"),
+        patched_version,
+    )
+
+    assert result.runtime_result is not None
+    assert result.runtime_result.execution_mode == "stub"
+    assert result.runtime_result.did_execute_real_work is False
+    assert "stub-результат" in result.assistant_response
 
 
 def test_confirm_pending_understanding_runtime_plan_does_not_repeat_show_understanding() -> None:

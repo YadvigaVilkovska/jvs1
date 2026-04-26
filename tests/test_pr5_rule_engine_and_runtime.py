@@ -100,7 +100,9 @@ def test_verifier_uses_default_success_condition_when_missing() -> None:
 
     verification = verifier.verify_status(task, "completed")
 
-    assert verification.checked_success_condition == "Пользователь получил результат по запросу: Проверить код"
+    assert verification.checked_success_condition == (
+        "Пользователь получил stub-результат без реального выполнения: Проверить код"
+    )
 
 
 def test_verifier_returns_false_for_non_completed_result() -> None:
@@ -121,8 +123,44 @@ def test_task_runtime_stub_returns_completed_result() -> None:
     result = runtime.execute(RuntimeTask(id="t1", goal="Проверить код"), version.program)
 
     assert result.status == "completed"
-    assert result.result_text == "Фиктивный результат выполнения задачи."
+    assert result.execution_mode == "stub"
+    assert result.did_execute_real_work is False
+    assert result.result_text == (
+        "Это stub-результат: реальное выполнение задачи не запускалось. "
+        "Система только показала симулированный результат MVP."
+    )
     assert result.verification_result.verified is True
+
+
+def test_task_runtime_stub_reports_stub_execution_mode() -> None:
+    service = AgentProgramService(InMemoryAgentProgramVersionRepository())
+    version = service.create_initial_version("v1", datetime.now(UTC))
+    runtime = TaskRuntimeStub(RuleEngine(), VerifierStub())
+
+    result = runtime.execute(RuntimeTask(id="t1", goal="Проверить код"), version.program)
+
+    assert result.execution_mode == "stub"
+
+
+def test_task_runtime_stub_did_not_execute_real_work() -> None:
+    service = AgentProgramService(InMemoryAgentProgramVersionRepository())
+    version = service.create_initial_version("v1", datetime.now(UTC))
+    runtime = TaskRuntimeStub(RuleEngine(), VerifierStub())
+
+    result = runtime.execute(RuntimeTask(id="t1", goal="Проверить код"), version.program)
+
+    assert result.did_execute_real_work is False
+
+
+def test_task_runtime_stub_result_text_is_honest() -> None:
+    service = AgentProgramService(InMemoryAgentProgramVersionRepository())
+    version = service.create_initial_version("v1", datetime.now(UTC))
+    runtime = TaskRuntimeStub(RuleEngine(), VerifierStub())
+
+    result = runtime.execute(RuntimeTask(id="t1", goal="Проверить код"), version.program)
+
+    assert "stub-результат" in result.result_text
+    assert "реальное выполнение задачи не запускалось" in result.result_text
 
 
 def test_task_runtime_stub_constructs_result_with_real_verification_result() -> None:
@@ -134,8 +172,18 @@ def test_task_runtime_stub_constructs_result_with_real_verification_result() -> 
 
     assert result.verification_result is not None
     assert result.verification_result.checked_success_condition == (
-        "Пользователь получил результат по запросу: Проверить код"
+        "Пользователь получил stub-результат без реального выполнения: Проверить код"
     )
+
+
+def test_verifier_checks_stub_success_condition_not_real_task() -> None:
+    verifier = VerifierStub()
+    task = RuntimeTask(id="t1", goal="Проверить код")
+
+    verification = verifier.verify_status(task, "completed")
+
+    assert "stub-результат" in verification.checked_success_condition
+    assert "без реального выполнения" in verification.checked_success_condition
 
 
 def test_task_runtime_stub_reports_applied_show_understanding_rule() -> None:
