@@ -88,6 +88,24 @@ class Orchestrator:
         self._pending_switch_service = pending_switch_service
         self._task_runtime = task_runtime
 
+    @staticmethod
+    def _get_fallback_response(episode: Episode) -> str:
+        """Contract: return the deterministic clarification response for the current fallback level."""
+
+        if episode.fallback_count == 1:
+            return "Я не смог однозначно понять запрос. Уточните, что нужно сделать."
+        if episode.fallback_count == 2:
+            return "Я снова не смог однозначно понять запрос. Напишите задачу одним коротким предложением."
+        return "Запрос всё ещё неясен. Начните с глагола: проверить, создать, показать или отменить."
+
+    @staticmethod
+    def _reset_fallback_count(episode: Episode) -> Episode:
+        """Contract: clear prior fallback history after a successful non-fallback semantic turn."""
+
+        if episode.fallback_count == 0:
+            return episode
+        return replace(episode, fallback_count=0)
+
     def handle_message(
         self,
         episode: Episode,
@@ -210,6 +228,7 @@ class Orchestrator:
             reason = "ambiguous_request" if any(
                 item.type == "ambiguous_request" for item in normalized_intake.items
             ) else "missing_mandatory_fields"
+            updated_episode = replace(episode, fallback_count=episode.fallback_count + 1)
             unknown_utterance = record_unknown_for_fallback(
                 self._unknown_utterance_repository,
                 episode_id=episode.id,
@@ -217,12 +236,12 @@ class Orchestrator:
                 utterance_text=user_message.text,
                 detected_intent=normalized_intake.primary_intent,
                 reason=reason,
-                fallback_count=episode.fallback_count + 1,
+                fallback_count=updated_episode.fallback_count,
                 context_snapshot={"episode_state": episode.state},
             )
             return OrchestratorTurnResult(
-                episode=episode,
-                assistant_response="Я не смог однозначно понять запрос. Уточните, что нужно сделать.",
+                episode=updated_episode,
+                assistant_response=self._get_fallback_response(updated_episode),
                 intake_result=normalized_intake,
                 program_version=active_program_version,
                 unknown_utterance=unknown_utterance,
@@ -230,7 +249,7 @@ class Orchestrator:
 
         if self._pending_switch_service.should_request_switch(episode, normalized_intake):
             decision = self._pending_switch_service.request_switch(
-                episode,
+                self._reset_fallback_count(episode),
                 user_message,
                 normalized_intake,
                 deferred_id=str(uuid4()),
@@ -255,7 +274,10 @@ class Orchestrator:
                 scope=rule_item.scope or "all_tasks",
             )
             self._rule_candidate_repository.save(rule_candidate)
-            updated_episode = replace(episode, state="pending_rule_review")
+            updated_episode = replace(
+                self._reset_fallback_count(episode),
+                state="pending_rule_review",
+            )
             return OrchestratorTurnResult(
                 episode=updated_episode,
                 assistant_response=(
@@ -273,7 +295,7 @@ class Orchestrator:
                 pending_candidates=(),
             )
             return OrchestratorTurnResult(
-                episode=episode,
+                episode=self._reset_fallback_count(episode),
                 assistant_response=QUERY_RESPONSE_TEMPLATE.format(active_version=contract.active_version),
                 intake_result=normalized_intake,
                 program_version=active_program_version,
@@ -296,7 +318,10 @@ class Orchestrator:
                 )
                 self._pending_understanding_repository.save(pending_understanding)
                 return OrchestratorTurnResult(
-                    episode=replace(episode, state="pending_understanding_review"),
+                    episode=replace(
+                        self._reset_fallback_count(episode),
+                        state="pending_understanding_review",
+                    ),
                     assistant_response=PENDING_UNDERSTANDING_RESPONSE_TEMPLATE.format(
                         task_text=runtime_task.goal
                     ),
@@ -305,7 +330,7 @@ class Orchestrator:
                 )
             runtime_result = self._task_runtime.execute(runtime_task, active_program_version.program)
             return OrchestratorTurnResult(
-                episode=episode,
+                episode=self._reset_fallback_count(episode),
                 assistant_response=runtime_result.result_text,
                 intake_result=normalized_intake,
                 runtime_result=runtime_result,
@@ -314,7 +339,7 @@ class Orchestrator:
 
         if normalized_intake.primary_intent == "chat":
             return OrchestratorTurnResult(
-                episode=episode,
+                episode=self._reset_fallback_count(episode),
                 assistant_response=CHAT_RESPONSE_TEXT,
                 intake_result=normalized_intake,
                 program_version=active_program_version,
@@ -322,7 +347,7 @@ class Orchestrator:
 
         if normalized_intake.primary_intent == "feedback":
             return OrchestratorTurnResult(
-                episode=episode,
+                episode=self._reset_fallback_count(episode),
                 assistant_response=FEEDBACK_RESPONSE_TEXT,
                 intake_result=normalized_intake,
                 program_version=active_program_version,
@@ -330,12 +355,13 @@ class Orchestrator:
 
         if normalized_intake.primary_intent == "correction":
             return OrchestratorTurnResult(
-                episode=episode,
+                episode=self._reset_fallback_count(episode),
                 assistant_response=CORRECTION_RESPONSE_TEXT,
                 intake_result=normalized_intake,
                 program_version=active_program_version,
             )
 
+        updated_episode = replace(episode, fallback_count=episode.fallback_count + 1)
         unknown_utterance = record_unknown_for_fallback(
             self._unknown_utterance_repository,
             episode_id=episode.id,
@@ -343,12 +369,12 @@ class Orchestrator:
             utterance_text=user_message.text,
             detected_intent=normalized_intake.primary_intent,
             reason="missing_mandatory_fields",
-            fallback_count=episode.fallback_count + 1,
+            fallback_count=updated_episode.fallback_count,
             context_snapshot={"episode_state": episode.state},
         )
         return OrchestratorTurnResult(
-            episode=episode,
-            assistant_response="Я не смог однозначно понять запрос. Уточните, что нужно сделать.",
+            episode=updated_episode,
+            assistant_response=self._get_fallback_response(updated_episode),
             intake_result=normalized_intake,
             program_version=active_program_version,
             unknown_utterance=unknown_utterance,
