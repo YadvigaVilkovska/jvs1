@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from jeeves_dap.api import create_app, serialize_value
 from jeeves_dap.domain.models import IntakeResult, MessageItem
+from jeeves_dap.repositories.agent_program_repository import InMemoryAgentProgramVersionRepository
 from jeeves_dap.repositories.episode_repository import InMemoryEpisodeRepository
 from jeeves_dap.repositories.pending_understanding_repository import InMemoryPendingUnderstandingRepository
 from jeeves_dap.repositories.rule_candidate_repository import InMemoryRuleCandidateRepository
-from jeeves_dap.services.classification import StubClassifier
+from jeeves_dap.services.agent_program_service import AgentProgramService
+from jeeves_dap.services.classification import LLMIntakeClassifier, StubClassifier, StubLLMIntakeClient
+from jeeves_dap.services.model_routing import ModelRouter, build_default_model_routing_config
 
 
 def create_episode_and_return_id(client: TestClient) -> str:
@@ -582,6 +586,63 @@ def test_api_manual_flow_returns_stub_honest_result() -> None:
     assert payload["runtime_result"]["execution_mode"] == "stub"
     assert payload["runtime_result"]["did_execute_real_work"] is False
     assert "stub-результат" in payload["assistant_response"]
+
+
+def test_api_default_behavior_unchanged_if_llm_not_enabled() -> None:
+    client = TestClient(create_app())
+    episode_id = create_episode_and_return_id(client)
+
+    response = client.post("/api/turns", json={"episode_id": episode_id, "text": "Проверь код"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["assistant_response"] == "Понял. Можем обсудить это подробнее."
+    assert payload["runtime_result"] is None
+
+
+def test_api_can_use_injected_llm_intake_classifier_for_normal_text() -> None:
+    program_repository = InMemoryAgentProgramVersionRepository()
+    program_service = AgentProgramService(program_repository)
+    active_version = program_service.create_initial_version("v1", datetime.now(UTC))
+    candidate = program_service.create_rule_candidate(
+        candidate_id="c1",
+        source_message_id="m0",
+        source_episode_id="e1",
+        text="Показывай понимание",
+        key="show_understanding_before_execution",
+        scope="all_tasks",
+    )
+    program_service.confirm_rule_candidate(
+        active_version=active_version,
+        candidate=candidate,
+        new_version_id="v2",
+        new_rule_id="r1",
+        created_at=datetime.now(UTC),
+    )
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(
+            result={
+                "message_id": "m1",
+                "primary_intent": "task",
+                "items": [{"type": "task", "text": "Проверить код"}],
+            }
+        ),
+    )
+    client = TestClient(
+        create_app(
+            classifier=classifier,
+            program_version_repository=program_repository,
+        )
+    )
+    episode_id = create_episode_and_return_id(client)
+
+    response = client.post("/api/turns", json={"episode_id": episode_id, "text": "Проверь код"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["episode_state"] == "pending_understanding_review"
+    assert 'Я понял задачу так: "Проверить код"' in payload["assistant_response"]
 
 
 def test_no_ui_buttons_added() -> None:

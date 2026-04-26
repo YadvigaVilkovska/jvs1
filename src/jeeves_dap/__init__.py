@@ -67,7 +67,14 @@ from jeeves_dap.repositories.user_message_repository import (
     UserMessageRepository,
 )
 from jeeves_dap.services.agent_program_service import AgentProgramService
-from jeeves_dap.services.classification import DevCommandClassifier, IntentClassifier, StubClassifier
+from jeeves_dap.services.classification import (
+    DevCommandClassifier,
+    IntentClassifier,
+    LLMIntakeClassifier,
+    LLMIntakeClient,
+    StubClassifier,
+    StubLLMIntakeClient,
+)
 from jeeves_dap.services.deterministic_preprocessor import (
     CANCEL_COMMANDS,
     CONFIRM_COMMANDS,
@@ -110,6 +117,8 @@ __all__ = [
     "IntentClassifier",
     "ItemValidationResult",
     "KNOWN_RULE_KEYS",
+    "LLMIntakeClassifier",
+    "LLMIntakeClient",
     "MessageItem",
     "ModelRoute",
     "ModelRoutePair",
@@ -124,6 +133,7 @@ __all__ = [
     "PreprocessResult",
     "QueryProgramContract",
     "StubClassifier",
+    "StubLLMIntakeClient",
     "ReviewFlags",
     "RuleCandidateRepository",
     "RuleEngine",

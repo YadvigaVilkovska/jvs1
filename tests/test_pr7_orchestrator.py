@@ -21,8 +21,14 @@ from jeeves_dap.repositories.pending_understanding_repository import InMemoryPen
 from jeeves_dap.repositories.rule_candidate_repository import InMemoryRuleCandidateRepository
 from jeeves_dap.repositories.unknown_utterance_repository import InMemoryUnknownUtteranceRepository
 from jeeves_dap.services.agent_program_service import AgentProgramService
-from jeeves_dap.services.classification import IntentClassifier, StubClassifier
+from jeeves_dap.services.classification import (
+    IntentClassifier,
+    LLMIntakeClassifier,
+    StubClassifier,
+    StubLLMIntakeClient,
+)
 from jeeves_dap.services.deterministic_preprocessor import DeterministicPreProcessor
+from jeeves_dap.services.model_routing import ModelRouter, build_default_model_routing_config
 from jeeves_dap.services.orchestrator import Orchestrator
 from jeeves_dap.services.pending_switch_service import PendingSwitchService
 from jeeves_dap.services.rule_engine import RuleEngine
@@ -143,6 +149,228 @@ def test_orchestrator_confirmation_flow_not_bypassed() -> None:
 
     assert result.program_version == active_version
     assert result.episode.state == "pending_rule_review"
+
+
+def test_normal_text_task_enters_pending_understanding_when_rule_active() -> None:
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(
+            result={
+                "message_id": "m1",
+                "primary_intent": "task",
+                "items": [{"type": "task", "text": "Проверить код"}],
+            }
+        ),
+    )
+    orchestrator, program_service, _, _, _, pending_repository = build_orchestrator(classifier)
+    active_version = build_active_program_version(program_service)
+    candidate = program_service.create_rule_candidate(
+        candidate_id="c1",
+        source_message_id="m0",
+        source_episode_id="e1",
+        text="Показывай понимание",
+        key="show_understanding_before_execution",
+        scope="all_tasks",
+    )
+    patched_version = program_service.confirm_rule_candidate(
+        active_version=active_version,
+        candidate=candidate,
+        new_version_id="v2",
+        new_rule_id="r1",
+        created_at=datetime.now(UTC),
+    )
+
+    result = orchestrator.handle_message(
+        build_episode(),
+        build_message("Проверь код"),
+        patched_version,
+    )
+
+    assert result.episode.state == "pending_understanding_review"
+    assert pending_repository.get_by_episode_id("e1") is not None
+    assert 'Я понял задачу так: "Проверить код"' in result.assistant_response
+
+
+def test_normal_text_task_can_execute_after_da_with_stub_result() -> None:
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(
+            result={
+                "message_id": "m1",
+                "primary_intent": "task",
+                "items": [{"type": "task", "text": "Проверить код"}],
+            }
+        ),
+    )
+    orchestrator, program_service, _, _, _, _ = build_orchestrator(classifier)
+    active_version = build_active_program_version(program_service)
+    candidate = program_service.create_rule_candidate(
+        candidate_id="c1",
+        source_message_id="m0",
+        source_episode_id="e1",
+        text="Показывай понимание",
+        key="show_understanding_before_execution",
+        scope="all_tasks",
+    )
+    patched_version = program_service.confirm_rule_candidate(
+        active_version=active_version,
+        candidate=candidate,
+        new_version_id="v2",
+        new_rule_id="r1",
+        created_at=datetime.now(UTC),
+    )
+    pending_result = orchestrator.handle_message(
+        build_episode(),
+        build_message("Проверь код"),
+        patched_version,
+    )
+
+    result = orchestrator.handle_message(
+        build_episode("pending_understanding_review"),
+        build_message("да"),
+        patched_version,
+    )
+
+    assert pending_result.episode.state == "pending_understanding_review"
+    assert result.runtime_result is not None
+    assert result.runtime_result.execution_mode == "stub"
+    assert "stub-результат" in result.assistant_response
+
+
+def test_normal_text_rule_still_requires_confirmation() -> None:
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(
+            result={
+                "message_id": "m1",
+                "primary_intent": "rule_update",
+                "items": [
+                    {
+                        "type": "rule_candidate",
+                        "text": "Показывай понимание",
+                        "key": "show_understanding_before_execution",
+                        "scope": "all_tasks",
+                    }
+                ],
+            }
+        ),
+    )
+    orchestrator, program_service, _, _, rule_candidate_repository, _ = build_orchestrator(classifier)
+    active_version = build_active_program_version(program_service)
+
+    result = orchestrator.handle_message(
+        build_episode(),
+        build_message("Показывай понимание"),
+        active_version,
+    )
+
+    assert result.episode.state == "pending_rule_review"
+    assert result.program_version == active_version
+    assert rule_candidate_repository.get_by_episode_id("e1") is not None
+
+
+def test_llm_cannot_bypass_rule_confirmation() -> None:
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(
+            result=IntakeResult(
+                message_id="m1",
+                primary_intent="rule_update",
+                items=(
+                    MessageItem(
+                        type="rule_candidate",
+                        text="Показывай понимание",
+                        key="show_understanding_before_execution",
+                        scope="all_tasks",
+                    ),
+                ),
+            )
+        ),
+    )
+    orchestrator, program_service, _, _, _, _ = build_orchestrator(classifier)
+    active_version = build_active_program_version(program_service)
+
+    result = orchestrator.handle_message(
+        build_episode(),
+        build_message("Показывай понимание"),
+        active_version,
+    )
+
+    assert result.episode.state == "pending_rule_review"
+    assert result.program_version == active_version
+
+
+def test_llm_cannot_bypass_pending_understanding_confirmation() -> None:
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(
+            result=IntakeResult(
+                message_id="m1",
+                primary_intent="task",
+                items=(MessageItem(type="task", text="Проверить код"),),
+            )
+        ),
+    )
+    orchestrator, program_service, _, _, _, _ = build_orchestrator(classifier)
+    active_version = build_active_program_version(program_service)
+    candidate = program_service.create_rule_candidate(
+        candidate_id="c1",
+        source_message_id="m0",
+        source_episode_id="e1",
+        text="Показывай понимание",
+        key="show_understanding_before_execution",
+        scope="all_tasks",
+    )
+    patched_version = program_service.confirm_rule_candidate(
+        active_version=active_version,
+        candidate=candidate,
+        new_version_id="v2",
+        new_rule_id="r1",
+        created_at=datetime.now(UTC),
+    )
+
+    result = orchestrator.handle_message(
+        build_episode(),
+        build_message("Проверь код"),
+        patched_version,
+    )
+
+    assert result.episode.state == "pending_understanding_review"
+    assert result.runtime_result is None
+
+
+def test_preprocessor_handles_da_before_llm_classifier_in_pending_rule_review() -> None:
+    client = StubLLMIntakeClient(
+        result={
+            "message_id": "m1",
+            "primary_intent": "chat",
+            "items": [{"type": "ambiguous_request", "text": "да"}],
+        }
+    )
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        client,
+    )
+    orchestrator, program_service, _, _, rule_candidate_repository, _ = build_orchestrator(classifier)
+    active_version = build_active_program_version(program_service)
+    candidate = program_service.create_rule_candidate(
+        candidate_id="c1",
+        source_message_id="m0",
+        source_episode_id="e1",
+        text="Показывай понимание",
+        key="show_understanding_before_execution",
+        scope="all_tasks",
+    )
+    rule_candidate_repository.save(candidate)
+
+    result = orchestrator.handle_message(
+        build_episode("pending_rule_review"),
+        build_message("да"),
+        active_version,
+    )
+
+    assert result.episode.state == "open"
+    assert client.calls == 0
 
 
 def test_orchestrator_cancel_message_cancels_episode() -> None:

@@ -8,7 +8,13 @@ from typing import get_type_hints
 import inspect
 
 from jeeves_dap.domain.models import IntakeResult, MessageItem
-from jeeves_dap.services.classification import DevCommandClassifier, IntentClassifier, StubClassifier
+from jeeves_dap.services.classification import (
+    DevCommandClassifier,
+    IntentClassifier,
+    LLMIntakeClassifier,
+    StubClassifier,
+    StubLLMIntakeClient,
+)
 from jeeves_dap.services.deterministic_preprocessor import (
     CANCEL_COMMANDS,
     CONFIRM_COMMANDS,
@@ -348,3 +354,173 @@ def test_existing_dev_command_classifier_still_works() -> None:
 
     assert result.primary_intent == "task"
     assert result.items == (MessageItem(type="task", text="Проверить код"),)
+
+
+def test_llm_intake_classifier_uses_intake_model_route() -> None:
+    router = ModelRouter(build_default_model_routing_config())
+    client = StubLLMIntakeClient(
+        result={
+            "message_id": "m1",
+            "primary_intent": "task",
+            "items": [{"type": "task", "text": "Проверить код"}],
+        }
+    )
+    classifier = LLMIntakeClassifier(router, client)
+
+    classifier.classify("Проверь код", "open")
+
+    assert client.received_route is not None
+    assert client.received_route.primary.provider == "openai"
+    assert client.received_route.primary.model == "gpt-4o-mini"
+
+
+def test_llm_intake_classifier_passes_primary_and_fallback_route_to_client() -> None:
+    router = ModelRouter(build_default_model_routing_config())
+    client = StubLLMIntakeClient(
+        result={
+            "message_id": "m1",
+            "primary_intent": "task",
+            "items": [{"type": "task", "text": "Проверить код"}],
+        }
+    )
+    classifier = LLMIntakeClassifier(router, client)
+
+    classifier.classify("Проверь код", "open")
+
+    assert client.received_route is not None
+    assert client.received_route.primary.provider == "openai"
+    assert client.received_route.fallback.provider == "deepseek"
+
+
+def test_llm_intake_classifier_parses_task_dict_result() -> None:
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(
+            result={
+                "message_id": "m1",
+                "primary_intent": "task",
+                "items": [{"type": "task", "text": "Проверить код"}],
+            }
+        ),
+    )
+
+    result = classifier.classify("Проверь код", "open")
+
+    assert result.message_id == "llm-intake"
+    assert result.primary_intent == "task"
+    assert result.items == (MessageItem(type="task", text="Проверить код"),)
+
+
+def test_llm_intake_classifier_parses_rule_candidate_dict_result() -> None:
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(
+            result={
+                "message_id": "m1",
+                "primary_intent": "rule_update",
+                "items": [
+                    {
+                        "type": "rule_candidate",
+                        "text": "Показывай понимание",
+                        "key": "show_understanding_before_execution",
+                        "scope": "all_tasks",
+                    }
+                ],
+            }
+        ),
+    )
+
+    result = classifier.classify("Показывай понимание", "open")
+
+    assert result.message_id == "llm-intake"
+    assert result.primary_intent == "rule_update"
+    assert result.items == (
+        MessageItem(
+            type="rule_candidate",
+            text="Показывай понимание",
+            key="show_understanding_before_execution",
+            scope="all_tasks",
+        ),
+    )
+
+
+def test_llm_intake_classifier_accepts_intake_result_directly() -> None:
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(
+            result=IntakeResult(
+                message_id="m1",
+                primary_intent="task",
+                items=(MessageItem(type="task", text="Проверить код"),),
+            )
+        ),
+    )
+
+    result = classifier.classify("Проверь код", "open")
+
+    assert result.message_id == "llm-intake"
+    assert result.primary_intent == "task"
+
+
+def test_llm_intake_classifier_invalid_output_becomes_ambiguous_request() -> None:
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(result={"bad": "shape"}),
+    )
+
+    result = classifier.classify("Проверь код", "open")
+
+    assert result.message_id == "llm-intake-error"
+    assert result.primary_intent == "chat"
+    assert result.items == (MessageItem(type="ambiguous_request", text="Проверь код"),)
+
+
+def test_llm_intake_classifier_client_exception_becomes_ambiguous_request() -> None:
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(exception=RuntimeError("boom")),
+    )
+
+    result = classifier.classify("Проверь код", "open")
+
+    assert result.message_id == "llm-intake-error"
+    assert result.items == (MessageItem(type="ambiguous_request", text="Проверь код"),)
+
+
+def test_llm_intake_classifier_router_exception_becomes_ambiguous_request() -> None:
+    class FailingRouter:
+        def get_route(self, role: str):
+            raise ValueError(f"bad role {role}")
+
+    classifier = LLMIntakeClassifier(FailingRouter(), StubLLMIntakeClient(result={}))
+
+    result = classifier.classify("Проверь код", "open")
+
+    assert result.message_id == "llm-intake-error"
+    assert result.items == (MessageItem(type="ambiguous_request", text="Проверь код"),)
+
+
+def test_llm_intake_classifier_does_not_call_work_route() -> None:
+    class TrackingRouter:
+        def __init__(self) -> None:
+            self.roles: list[str] = []
+
+        def get_route(self, role: str):
+            self.roles.append(role)
+            return ModelRouter(build_default_model_routing_config()).get_route(role)
+
+    router = TrackingRouter()
+    classifier = LLMIntakeClassifier(
+        router,
+        StubLLMIntakeClient(
+            result={
+                "message_id": "m1",
+                "primary_intent": "task",
+                "items": [{"type": "task", "text": "Проверить код"}],
+            }
+        ),
+    )
+
+    classifier.classify("Проверь код", "open")
+
+    assert router.roles == ["intake"]
