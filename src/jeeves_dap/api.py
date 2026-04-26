@@ -58,6 +58,7 @@ class CreateEpisodeResponse(BaseModel):
 
     episode_id: str
     episode_state: str
+    fallback_count: int
     program_version: int
 
 
@@ -73,6 +74,7 @@ class TurnResponse(BaseModel):
 
     episode_id: str
     episode_state: str
+    fallback_count: int
     assistant_response: str
     intake_result: dict[str, Any] | None = None
     runtime_result: dict[str, Any] | None = None
@@ -223,6 +225,7 @@ ROOT_HTML = """<!doctype html>
         <div class="subtitle">Тонкий UI для ручной проверки API-потока.</div>
         <div class="status">
           <span>episode_state: <strong id="episode-state">loading</strong></span>
+          <span>fallback_count: <strong id="fallback-count">0</strong></span>
           <span>program_version: <strong id="program-version">-</strong></span>
         </div>
       </header>
@@ -248,6 +251,7 @@ ROOT_HTML = """<!doctype html>
       const turnForm = document.getElementById("turn-form");
       const turnInput = document.getElementById("turn-input");
       const episodeState = document.getElementById("episode-state");
+      const fallbackCount = document.getElementById("fallback-count");
       const programVersion = document.getElementById("program-version");
       const debugJson = document.getElementById("debug-json");
 
@@ -263,6 +267,7 @@ ROOT_HTML = """<!doctype html>
 
       function updateMeta(payload) {
         episodeState.textContent = payload.episode_state ?? episodeState.textContent;
+        fallbackCount.textContent = payload.fallback_count ?? fallbackCount.textContent;
         programVersion.textContent = payload.program_version ?? programVersion.textContent;
         debugJson.textContent = JSON.stringify(payload, null, 2);
       }
@@ -402,6 +407,7 @@ def create_app(
         return CreateEpisodeResponse(
             episode_id=episode.id,
             episode_state=episode.state,
+            fallback_count=episode.fallback_count,
             program_version=active_version.version_number,
         )
 
@@ -435,6 +441,7 @@ def create_app(
         return TurnResponse(
             episode_id=turn_result.episode.id,
             episode_state=turn_result.episode.state,
+            fallback_count=turn_result.episode.fallback_count,
             assistant_response=turn_result.assistant_response,
             intake_result=serialize_value(turn_result.intake_result),
             runtime_result=serialize_value(turn_result.runtime_result),

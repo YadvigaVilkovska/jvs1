@@ -80,6 +80,16 @@ def test_root_ui_has_no_confirm_reject_buttons() -> None:
     assert "<button" not in html
 
 
+def test_api_no_buttons_added() -> None:
+    client = TestClient(create_app())
+
+    response = client.get("/")
+    html = response.text.lower()
+
+    assert "<button" not in html
+    assert "onclick=" not in html
+
+
 def test_root_ui_mentions_text_only_confirmation() -> None:
     client = TestClient(create_app())
 
@@ -112,8 +122,9 @@ def test_create_episode_endpoint() -> None:
 
     assert response.status_code == 200
     payload = response.json()
-    assert set(payload) == {"episode_id", "episode_state", "program_version"}
+    assert set(payload) == {"episode_id", "episode_state", "fallback_count", "program_version"}
     assert payload["episode_state"] == "open"
+    assert payload["fallback_count"] == 0
     assert payload["program_version"] == 1
     assert payload["episode_id"]
 
@@ -127,7 +138,20 @@ def test_turn_endpoint_returns_assistant_response() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["assistant_response"] == "Понял. Можем обсудить это подробнее."
+    assert payload["fallback_count"] == 0
     assert payload["runtime_result"] is None
+
+
+def test_api_response_contains_fallback_count() -> None:
+    client = TestClient(create_app())
+    episode_id = create_episode_and_return_id(client)
+
+    response = client.post("/api/turns", json={"episode_id": episode_id, "text": "Привет"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "fallback_count" in payload
+    assert payload["fallback_count"] == 0
 
 
 def test_turn_endpoint_missing_episode_id_returns_422() -> None:
@@ -189,7 +213,84 @@ def test_turn_endpoint_handles_cancel_text() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["episode_state"] == "cancelled"
+    assert payload["fallback_count"] == 0
     assert payload["assistant_response"] == "Эпизод отменён."
+
+
+def test_api_fallback_increments_fallback_count() -> None:
+    client = TestClient(create_app())
+    episode_id = create_episode_and_return_id(client)
+
+    response = client.post(
+        "/api/turns",
+        json={"episode_id": episode_id, "text": "/ambiguous Сделай что-нибудь хорошее"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["fallback_count"] == 1
+
+
+def test_api_second_fallback_returns_fallback_count_2() -> None:
+    client = TestClient(create_app())
+    episode_id = create_episode_and_return_id(client)
+
+    first_response = client.post(
+        "/api/turns",
+        json={"episode_id": episode_id, "text": "/ambiguous Сделай что-нибудь хорошее"},
+    )
+    assert first_response.status_code == 200
+
+    second_response = client.post(
+        "/api/turns",
+        json={"episode_id": episode_id, "text": "/ambiguous Сделай что-нибудь хорошее"},
+    )
+
+    assert second_response.status_code == 200
+    payload = second_response.json()
+    assert payload["fallback_count"] == 2
+
+
+def test_api_successful_turn_resets_fallback_count() -> None:
+    client = TestClient(create_app())
+    episode_id = create_episode_and_return_id(client)
+
+    fallback_response = client.post(
+        "/api/turns",
+        json={"episode_id": episode_id, "text": "/ambiguous Сделай что-нибудь хорошее"},
+    )
+    assert fallback_response.status_code == 200
+    assert fallback_response.json()["fallback_count"] == 1
+
+    success_response = client.post("/api/turns", json={"episode_id": episode_id, "text": "/query"})
+
+    assert success_response.status_code == 200
+    assert success_response.json()["fallback_count"] == 0
+
+
+def test_api_task_pending_understanding_resets_fallback_count() -> None:
+    client = TestClient(create_app())
+    episode_id = create_episode_and_return_id(client)
+
+    fallback_response = client.post(
+        "/api/turns",
+        json={"episode_id": episode_id, "text": "/ambiguous Сделай что-нибудь хорошее"},
+    )
+    assert fallback_response.status_code == 200
+    assert fallback_response.json()["fallback_count"] == 1
+
+    rule_response = client.post("/api/turns", json={"episode_id": episode_id, "text": "/rule Показывай понимание"})
+    assert rule_response.status_code == 200
+
+    confirm_rule_response = client.post("/api/turns", json={"episode_id": episode_id, "text": "да"})
+    assert confirm_rule_response.status_code == 200
+
+    task_response = client.post("/api/turns", json={"episode_id": episode_id, "text": "/task Проверить код"})
+
+    assert task_response.status_code == 200
+    payload = task_response.json()
+    assert payload["episode_state"] == "pending_understanding_review"
+    assert payload["fallback_count"] == 0
 
 
 def test_turn_endpoint_default_chat_intake_message_id_matches_user_message() -> None:
@@ -268,6 +369,7 @@ def test_turn_response_contract_contains_required_fields() -> None:
     assert set(payload) == {
         "episode_id",
         "episode_state",
+        "fallback_count",
         "assistant_response",
         "intake_result",
         "runtime_result",
