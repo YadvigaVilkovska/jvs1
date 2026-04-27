@@ -9,6 +9,7 @@ description = "Jeeves DAP MVP data foundation and contracts."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.110,<1",
+    "uvicorn>=0.27,<1",
 ]
 
 [tool.pytest.ini_options]
