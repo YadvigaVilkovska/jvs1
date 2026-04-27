@@ -475,6 +475,44 @@ def test_llm_intake_classifier_invalid_output_becomes_ambiguous_request() -> Non
     assert result.items == (MessageItem(type="ambiguous_request", text="Проверь код"),)
 
 
+def test_llm_intake_classifier_mixed_primary_intent_becomes_ambiguous_request() -> None:
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(
+            result={
+                "message_id": "m1",
+                "primary_intent": "mixed",
+                "items": [{"type": "task", "text": "Проверить код"}],
+            }
+        ),
+    )
+
+    result = classifier.classify("Проверь код", "open")
+
+    assert result.message_id == "llm-intake-error"
+    assert result.primary_intent == "chat"
+    assert result.items == (MessageItem(type="ambiguous_request", text="Проверь код"),)
+
+
+def test_llm_intake_classifier_unsupported_item_type_becomes_ambiguous_request() -> None:
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(
+            result={
+                "message_id": "m1",
+                "primary_intent": "task",
+                "items": [{"type": "unsupported", "text": "Проверить код"}],
+            }
+        ),
+    )
+
+    result = classifier.classify("Проверь код", "open")
+
+    assert result.message_id == "llm-intake-error"
+    assert result.primary_intent == "chat"
+    assert result.items == (MessageItem(type="ambiguous_request", text="Проверь код"),)
+
+
 def test_llm_intake_classifier_client_exception_becomes_ambiguous_request() -> None:
     classifier = LLMIntakeClassifier(
         ModelRouter(build_default_model_routing_config()),

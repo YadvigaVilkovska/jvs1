@@ -4,9 +4,16 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import replace
-from typing import Any
+from typing import Any, get_args
 
-from jeeves_dap.domain.models import EpisodeState, IntakeResult, MessageItem, ModelRoutePair
+from jeeves_dap.domain.models import (
+    EpisodeState,
+    IntakeResult,
+    MessageItem,
+    MessageItemType,
+    ModelRoutePair,
+    PrimaryIntent,
+)
 from jeeves_dap.services.model_routing import ModelRouter
 
 DEV_PLACEHOLDER_MESSAGE_ID = "dev-command"
@@ -17,6 +24,8 @@ RULE_COMMAND_PREFIX = "/rule "
 FUTURE_RULE_COMMAND_PREFIX = "/future-rule "
 QUERY_COMMAND = "/query"
 AMBIGUOUS_COMMAND_PREFIX = "/ambiguous "
+SUPPORTED_PRIMARY_INTENTS = frozenset(get_args(PrimaryIntent))
+SUPPORTED_MESSAGE_ITEM_TYPES = frozenset(get_args(MessageItemType))
 
 
 class IntentClassifier(ABC):
@@ -119,9 +128,15 @@ class LLMIntakeClassifier(IntentClassifier):
         """Contract: parse one client payload into IntakeResult or fail closed."""
 
         if isinstance(raw_result, IntakeResult):
+            _validate_primary_intent(raw_result.primary_intent)
+            for item in raw_result.items:
+                _validate_message_item_type(item.type)
             return raw_result
         if not isinstance(raw_result, dict):
             raise ValueError("LLM intake output must be IntakeResult or dict")
+
+        raw_primary_intent = raw_result["primary_intent"]
+        _validate_primary_intent(raw_primary_intent)
 
         raw_items = raw_result["items"]
         if not isinstance(raw_items, list):
@@ -129,7 +144,7 @@ class LLMIntakeClassifier(IntentClassifier):
 
         items = tuple(
             MessageItem(
-                type=item["type"],
+                type=_parse_message_item_type(item["type"]),
                 text=item["text"],
                 scope=item.get("scope"),
                 key=item.get("key"),
@@ -140,7 +155,7 @@ class LLMIntakeClassifier(IntentClassifier):
         )
         return IntakeResult(
             message_id=str(raw_result.get("message_id", LLM_INTAKE_MESSAGE_ID)),
-            primary_intent=raw_result["primary_intent"],
+            primary_intent=raw_primary_intent,
             items=items,
         )
 
@@ -209,3 +224,24 @@ class DevCommandClassifier(IntentClassifier):
             primary_intent="chat",
             items=(),
         )
+
+
+def _validate_primary_intent(primary_intent: str) -> None:
+    """Contract: reject unsupported or explicitly banned primary intent values."""
+
+    if primary_intent == "mixed" or primary_intent not in SUPPORTED_PRIMARY_INTENTS:
+        raise ValueError(f"Unsupported primary_intent: {primary_intent}")
+
+
+def _validate_message_item_type(item_type: str) -> None:
+    """Contract: reject unsupported semantic item types before domain object creation."""
+
+    if item_type not in SUPPORTED_MESSAGE_ITEM_TYPES:
+        raise ValueError(f"Unsupported item type: {item_type}")
+
+
+def _parse_message_item_type(item_type: str) -> str:
+    """Contract: validate and return one supported message item type."""
+
+    _validate_message_item_type(item_type)
+    return item_type

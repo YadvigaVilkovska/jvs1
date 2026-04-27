@@ -309,7 +309,7 @@ class RuntimeResult:
 
     task_id: str
     status: str
-    execution_mode: Literal["stub"]
+    execution_mode: Literal["stub", "read_only_repo_review"]
     did_execute_real_work: bool
     result_text: str
     applied_rules: tuple[str, ...]

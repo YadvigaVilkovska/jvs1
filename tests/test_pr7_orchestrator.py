@@ -31,6 +31,7 @@ from jeeves_dap.services.deterministic_preprocessor import DeterministicPreProce
 from jeeves_dap.services.model_routing import ModelRouter, build_default_model_routing_config
 from jeeves_dap.services.orchestrator import Orchestrator
 from jeeves_dap.services.pending_switch_service import PendingSwitchService
+from jeeves_dap.services.repo_review_runtime import RepoReviewRuntime
 from jeeves_dap.services.rule_engine import RuleEngine
 from jeeves_dap.services.task_runtime_stub import TaskRuntimeStub
 from jeeves_dap.services.verifier_stub import VerifierStub
@@ -50,6 +51,7 @@ class TrackingClassifier(IntentClassifier):
 
 def build_orchestrator(
     classifier: IntentClassifier,
+    task_runtime: TaskRuntimeStub | None = None,
 ) -> tuple[
     Orchestrator,
     AgentProgramService,
@@ -72,7 +74,7 @@ def build_orchestrator(
         pending_understanding_repository=pending_understanding_repository,
         unknown_utterance_repository=unknown_repository,
         pending_switch_service=PendingSwitchService(deferred_repository),
-        task_runtime=TaskRuntimeStub(RuleEngine(), VerifierStub()),
+        task_runtime=task_runtime or TaskRuntimeStub(RuleEngine(), VerifierStub()),
     )
     return (
         orchestrator,
@@ -191,6 +193,45 @@ def test_normal_text_task_enters_pending_understanding_when_rule_active() -> Non
     assert 'Я понял задачу так: "Проверить код"' in result.assistant_response
 
 
+def test_normal_text_repo_review_enters_pending_understanding_when_rule_active() -> None:
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(
+            result={
+                "message_id": "m1",
+                "primary_intent": "task",
+                "items": [{"type": "task", "text": "Проверить репозиторий"}],
+            }
+        ),
+    )
+    orchestrator, program_service, _, _, _, pending_repository = build_orchestrator(classifier)
+    active_version = build_active_program_version(program_service)
+    candidate = program_service.create_rule_candidate(
+        candidate_id="c1",
+        source_message_id="m0",
+        source_episode_id="e1",
+        text="Показывай понимание",
+        key="show_understanding_before_execution",
+        scope="all_tasks",
+    )
+    patched_version = program_service.confirm_rule_candidate(
+        active_version=active_version,
+        candidate=candidate,
+        new_version_id="v2",
+        new_rule_id="r1",
+        created_at=datetime.now(UTC),
+    )
+
+    result = orchestrator.handle_message(
+        build_episode(),
+        build_message("Проверь репозиторий"),
+        patched_version,
+    )
+
+    assert result.episode.state == "pending_understanding_review"
+    assert pending_repository.get_by_episode_id("e1") is not None
+
+
 def test_normal_text_task_can_execute_after_da_with_stub_result() -> None:
     classifier = LLMIntakeClassifier(
         ModelRouter(build_default_model_routing_config()),
@@ -235,6 +276,119 @@ def test_normal_text_task_can_execute_after_da_with_stub_result() -> None:
     assert result.runtime_result is not None
     assert result.runtime_result.execution_mode == "stub"
     assert "stub-результат" in result.assistant_response
+
+
+def test_confirm_repo_review_runs_read_only_runtime() -> None:
+    type_ignore_pattern = "type" + ": " + "ignore"
+    mojibake_pattern = "\\|".join(
+        (
+            chr(0x03A9),
+            chr(0x00B5),
+            chr(0x00E6),
+            chr(0x00C7),
+            chr(0x221E),
+        )
+    )
+
+    def runner(command: tuple[str, ...], cwd: Path):
+        del cwd
+        outputs = {
+            ("git", "status", "--short"): (" M src/jeeves_dap/services/task_runtime_stub.py", "", 0),
+            ("git", "status"): ("On branch main", "", 0),
+            ("git", "log", "--oneline", "-5"): ("abc123 latest", "", 0),
+            ("git", "diff", "--name-only"): ("src/jeeves_dap/services/task_runtime_stub.py", "", 0),
+            ("git", "diff", "--", "src", "tests", "scripts", ".env.example", ".gitignore"): ("diff", "", 0),
+            ("grep", "-R", "-n", "--include=*.py", type_ignore_pattern, "src", "tests", "scripts"): ("", "", 1),
+            ("grep", "-R", "-n", "--include=*.py", mojibake_pattern, "src", "tests", "scripts"): ("", "", 1),
+            ("git", "ls-files", "--others", "--exclude-standard"): ("", "", 0),
+            ("cat", "AGENTS.md"): ("# AGENTS.md — Jeeves DAP Codex Operating Rules", "", 0),
+        }
+        stdout, stderr, returncode = outputs[command]
+        return type("Result", (), {"command": command, "returncode": returncode, "stdout": stdout, "stderr": stderr})()
+
+    task_runtime = TaskRuntimeStub(
+        RuleEngine(),
+        VerifierStub(),
+        RepoReviewRuntime(command_runner=runner, repo_root=Path.cwd()),
+    )
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(
+            result=IntakeResult(
+                message_id="m1",
+                primary_intent="task",
+                items=(MessageItem(type="task", text="Проверить репозиторий"),),
+            )
+        ),
+    )
+    orchestrator, program_service, _, _, _, _ = build_orchestrator(classifier, task_runtime)
+    active_version = build_active_program_version(program_service)
+    candidate = program_service.create_rule_candidate(
+        candidate_id="c1",
+        source_message_id="m0",
+        source_episode_id="e1",
+        text="Показывай понимание",
+        key="show_understanding_before_execution",
+        scope="all_tasks",
+    )
+    patched_version = program_service.confirm_rule_candidate(
+        active_version=active_version,
+        candidate=candidate,
+        new_version_id="v2",
+        new_rule_id="r1",
+        created_at=datetime.now(UTC),
+    )
+    orchestrator.handle_message(build_episode(), build_message("Проверь репозиторий"), patched_version)
+
+    result = orchestrator.handle_message(
+        build_episode("pending_understanding_review"),
+        build_message("да"),
+        patched_version,
+    )
+
+    assert result.runtime_result is not None
+    assert result.runtime_result.execution_mode == "read_only_repo_review"
+    assert result.runtime_result.did_execute_real_work is True
+    assert "Read-only repository review completed" in result.assistant_response
+
+
+def test_reject_repo_review_does_not_run_runtime() -> None:
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(
+            result=IntakeResult(
+                message_id="m1",
+                primary_intent="task",
+                items=(MessageItem(type="task", text="Проверить репозиторий"),),
+            )
+        ),
+    )
+    orchestrator, program_service, _, _, _, _ = build_orchestrator(classifier)
+    active_version = build_active_program_version(program_service)
+    candidate = program_service.create_rule_candidate(
+        candidate_id="c1",
+        source_message_id="m0",
+        source_episode_id="e1",
+        text="Показывай понимание",
+        key="show_understanding_before_execution",
+        scope="all_tasks",
+    )
+    patched_version = program_service.confirm_rule_candidate(
+        active_version=active_version,
+        candidate=candidate,
+        new_version_id="v2",
+        new_rule_id="r1",
+        created_at=datetime.now(UTC),
+    )
+    orchestrator.handle_message(build_episode(), build_message("Проверь репозиторий"), patched_version)
+
+    result = orchestrator.handle_message(
+        build_episode("pending_understanding_review"),
+        build_message("нет"),
+        patched_version,
+    )
+
+    assert result.runtime_result is None
 
 
 def test_normal_text_rule_still_requires_confirmation() -> None:
@@ -429,6 +583,7 @@ def test_orchestrator_ambiguous_request_records_unknown() -> None:
     assert result.unknown_utterance is not None
     assert result.episode.fallback_count == 1
     assert result.unknown_utterance.reason == "ambiguous_request"
+    assert result.runtime_result is None
     assert len(unknown_repository.list_all()) == 1
 
 
@@ -789,6 +944,120 @@ def test_orchestrator_reject_switch_uses_stored_previous_state() -> None:
     assert result.episode.state == "pending_understanding_review"
 
 
+def test_confirm_pending_switch_after_pending_rule_review_deletes_stale_rule_candidate() -> None:
+    classifier = TrackingClassifier(IntakeResult(message_id="m1", primary_intent="chat", items=()))
+    orchestrator, program_service, _, deferred_repository, rule_candidate_repository, _ = build_orchestrator(
+        classifier
+    )
+    active_version = build_active_program_version(program_service)
+    rule_candidate_repository.save(
+        program_service.create_rule_candidate(
+            candidate_id="c1",
+            source_message_id="m0",
+            source_episode_id="e1",
+            text="Показывай понимание",
+            key="show_understanding_before_execution",
+            scope="all_tasks",
+        )
+    )
+    deferred_repository.save(
+        PendingSwitchService(deferred_repository).request_switch(
+            build_episode("pending_rule_review"),
+            build_message("Новая тема", message_id="m2"),
+            IntakeResult(message_id="m2", primary_intent="chat", items=()),
+            deferred_id="d1",
+            created_at=datetime.now(UTC),
+        ).deferred_message
+    )
+
+    result = orchestrator.handle_message(
+        build_episode("pending_switch_confirmation"),
+        build_message("да"),
+        active_version,
+    )
+
+    assert result.episode.state == "cancelled"
+    assert rule_candidate_repository.get_by_episode_id("e1") is None
+    assert deferred_repository.get_by_episode_id("e1") is None
+
+
+def test_confirm_pending_switch_after_pending_understanding_review_deletes_stale_understanding() -> None:
+    classifier = TrackingClassifier(IntakeResult(message_id="m1", primary_intent="chat", items=()))
+    orchestrator, program_service, _, deferred_repository, _, pending_repository = build_orchestrator(
+        classifier
+    )
+    active_version = build_active_program_version(program_service)
+    pending_repository.save(
+        PendingUnderstanding(
+            id="p1",
+            episode_id="e1",
+            message_id="m1",
+            task=RuntimeTask(id="m1", goal="Проверить код"),
+            intake_result=IntakeResult(
+                message_id="m1",
+                primary_intent="task",
+                items=(MessageItem(type="task", text="Проверить код"),),
+            ),
+            created_at=datetime.now(UTC),
+        )
+    )
+    deferred_repository.save(
+        PendingSwitchService(deferred_repository).request_switch(
+            build_episode("pending_understanding_review"),
+            build_message("Новая тема", message_id="m2"),
+            IntakeResult(message_id="m2", primary_intent="chat", items=()),
+            deferred_id="d1",
+            created_at=datetime.now(UTC),
+        ).deferred_message
+    )
+
+    result = orchestrator.handle_message(
+        build_episode("pending_switch_confirmation"),
+        build_message("да"),
+        active_version,
+    )
+
+    assert result.episode.state == "cancelled"
+    assert pending_repository.get_by_episode_id("e1") is None
+    assert deferred_repository.get_by_episode_id("e1") is None
+
+
+def test_reject_pending_switch_keeps_original_pending_rule_candidate() -> None:
+    classifier = TrackingClassifier(IntakeResult(message_id="m1", primary_intent="chat", items=()))
+    orchestrator, program_service, _, deferred_repository, rule_candidate_repository, _ = build_orchestrator(
+        classifier
+    )
+    active_version = build_active_program_version(program_service)
+    candidate = program_service.create_rule_candidate(
+        candidate_id="c1",
+        source_message_id="m0",
+        source_episode_id="e1",
+        text="Показывай понимание",
+        key="show_understanding_before_execution",
+        scope="all_tasks",
+    )
+    rule_candidate_repository.save(candidate)
+    deferred_repository.save(
+        PendingSwitchService(deferred_repository).request_switch(
+            build_episode("pending_rule_review"),
+            build_message("Новая тема", message_id="m2"),
+            IntakeResult(message_id="m2", primary_intent="chat", items=()),
+            deferred_id="d1",
+            created_at=datetime.now(UTC),
+        ).deferred_message
+    )
+
+    result = orchestrator.handle_message(
+        build_episode("pending_switch_confirmation"),
+        build_message("нет"),
+        active_version,
+    )
+
+    assert result.episode.state == "pending_rule_review"
+    assert rule_candidate_repository.get_by_episode_id("e1") == candidate
+    assert deferred_repository.get_by_episode_id("e1") is None
+
+
 def test_orchestrator_has_no_unused_repository_dependencies() -> None:
     parameters = inspect.signature(Orchestrator.__init__).parameters
 
@@ -1038,6 +1307,66 @@ def test_task_executes_immediately_when_show_understanding_rule_inactive() -> No
     assert result.runtime_result.execution_mode == "stub"
     assert result.runtime_result.did_execute_real_work is False
     assert "stub-результат" in result.assistant_response
+
+
+def test_unknown_task_still_returns_honest_stub_or_clarification_per_design() -> None:
+    classifier = StubClassifier(
+        default_result=IntakeResult(
+            message_id="m1",
+            primary_intent="task",
+            items=(MessageItem(type="task", text="Проверить код"),),
+        )
+    )
+    orchestrator, program_service, _, _, _, _ = build_orchestrator(classifier)
+
+    result = orchestrator.handle_message(
+        build_episode(),
+        build_message("Проверить код"),
+        build_active_program_version(program_service),
+    )
+
+    assert result.runtime_result is not None
+    assert result.runtime_result.execution_mode == "stub"
+
+
+def test_vague_task_does_not_execute_repo_review() -> None:
+    classifier = StubClassifier(
+        default_result=IntakeResult(
+            message_id="m1",
+            primary_intent="task",
+            items=(MessageItem(type="task", text="Сделай нормально"),),
+        )
+    )
+    orchestrator, program_service, _, _, _, _ = build_orchestrator(classifier)
+
+    result = orchestrator.handle_message(
+        build_episode(),
+        build_message("Сделай нормально"),
+        build_active_program_version(program_service),
+    )
+
+    assert result.runtime_result is None
+    assert result.assistant_response == "Что именно нужно сделать? Опишите задачу одним коротким предложением."
+
+
+def test_write_oriented_task_does_not_execute_repo_review() -> None:
+    classifier = StubClassifier(
+        default_result=IntakeResult(
+            message_id="m1",
+            primary_intent="task",
+            items=(MessageItem(type="task", text="Исправь это"),),
+        )
+    )
+    orchestrator, program_service, _, _, _, _ = build_orchestrator(classifier)
+
+    result = orchestrator.handle_message(
+        build_episode(),
+        build_message("Исправь это"),
+        build_active_program_version(program_service),
+    )
+
+    assert result.runtime_result is None
+    assert result.assistant_response == "Что именно нужно сделать? Опишите задачу одним коротким предложением."
 
 
 def test_orchestrator_task_response_does_not_claim_real_execution() -> None:
@@ -1579,6 +1908,58 @@ def test_cancel_clears_deferred_message() -> None:
     )
 
     assert result.episode.state == "cancelled"
+    assert deferred_repository.get_by_episode_id("e1") is None
+
+
+def test_cancel_pending_switch_clears_pending_records() -> None:
+    classifier = TrackingClassifier(IntakeResult(message_id="m1", primary_intent="chat", items=()))
+    orchestrator, program_service, _, deferred_repository, rule_candidate_repository, pending_repository = (
+        build_orchestrator(classifier)
+    )
+    active_version = build_active_program_version(program_service)
+    rule_candidate_repository.save(
+        program_service.create_rule_candidate(
+            candidate_id="c1",
+            source_message_id="m0",
+            source_episode_id="e1",
+            text="Показывай понимание",
+            key="show_understanding_before_execution",
+            scope="all_tasks",
+        )
+    )
+    pending_repository.save(
+        PendingUnderstanding(
+            id="p1",
+            episode_id="e1",
+            message_id="m1",
+            task=RuntimeTask(id="m1", goal="Проверить код"),
+            intake_result=IntakeResult(
+                message_id="m1",
+                primary_intent="task",
+                items=(MessageItem(type="task", text="Проверить код"),),
+            ),
+            created_at=datetime.now(UTC),
+        )
+    )
+    deferred_repository.save(
+        PendingSwitchService(deferred_repository).request_switch(
+            build_episode("pending_rule_review"),
+            build_message("Новая тема", message_id="m2"),
+            IntakeResult(message_id="m2", primary_intent="chat", items=()),
+            deferred_id="d1",
+            created_at=datetime.now(UTC),
+        ).deferred_message
+    )
+
+    result = orchestrator.handle_message(
+        build_episode("pending_switch_confirmation"),
+        build_message("отмена"),
+        active_version,
+    )
+
+    assert result.episode.state == "cancelled"
+    assert rule_candidate_repository.get_by_episode_id("e1") is None
+    assert pending_repository.get_by_episode_id("e1") is None
     assert deferred_repository.get_by_episode_id("e1") is None
 
 

@@ -198,6 +198,8 @@ class Orchestrator:
 
             if episode.state == "pending_switch_confirmation":
                 if preprocess_result.action == "confirm":
+                    self._rule_candidate_repository.delete_by_episode_id(episode.id)
+                    self._pending_understanding_repository.delete_by_episode_id(episode.id)
                     decision = self._pending_switch_service.confirm_switch(episode)
                     return OrchestratorTurnResult(
                         episode=decision.episode,
@@ -307,6 +309,13 @@ class Orchestrator:
                 id=user_message.id,
                 goal=task_item.text,
             )
+            if self._task_runtime.requires_clarification(runtime_task):
+                return OrchestratorTurnResult(
+                    episode=self._reset_fallback_count(episode),
+                    assistant_response=self._task_runtime.clarification_response(),
+                    intake_result=normalized_intake,
+                    program_version=active_program_version,
+                )
             if active_program_version.program.communication_policy.show_understanding_before_execution:
                 pending_understanding = PendingUnderstanding(
                     id=str(uuid4()),

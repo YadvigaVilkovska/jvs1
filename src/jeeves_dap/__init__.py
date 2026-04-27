@@ -88,6 +88,7 @@ from jeeves_dap.services.model_routing import (
     build_model_routing_config_from_env,
 )
 from jeeves_dap.services.pending_switch_service import PendingSwitchService
+from jeeves_dap.services.repo_review_runtime import RepoReviewRuntime
 from jeeves_dap.services.orchestrator import Orchestrator, OrchestratorTurnResult
 from jeeves_dap.services.rule_engine import RuleEngine
 from jeeves_dap.services.task_runtime_stub import TaskRuntimeStub
@@ -137,6 +138,7 @@ __all__ = [
     "ReviewFlags",
     "RuleCandidateRepository",
     "RuleEngine",
+    "RepoReviewRuntime",
     "RuntimePlan",
     "RuntimeResult",
     "RuntimeStep",

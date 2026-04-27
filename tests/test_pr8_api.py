@@ -15,7 +15,11 @@ from jeeves_dap.repositories.pending_understanding_repository import InMemoryPen
 from jeeves_dap.repositories.rule_candidate_repository import InMemoryRuleCandidateRepository
 from jeeves_dap.services.agent_program_service import AgentProgramService
 from jeeves_dap.services.classification import LLMIntakeClassifier, StubClassifier, StubLLMIntakeClient
+from jeeves_dap.services.repo_review_runtime import RepoReviewRuntime
 from jeeves_dap.services.model_routing import ModelRouter, build_default_model_routing_config
+from jeeves_dap.services.rule_engine import RuleEngine
+from jeeves_dap.services.task_runtime_stub import TaskRuntimeStub
+from jeeves_dap.services.verifier_stub import VerifierStub
 
 
 def create_episode_and_return_id(client: TestClient) -> str:
@@ -643,6 +647,94 @@ def test_api_can_use_injected_llm_intake_classifier_for_normal_text() -> None:
     payload = response.json()
     assert payload["episode_state"] == "pending_understanding_review"
     assert 'Я понял задачу так: "Проверить код"' in payload["assistant_response"]
+
+
+def test_api_manual_flow_repo_review_returns_real_read_only_result() -> None:
+    type_ignore_pattern = "type" + ": " + "ignore"
+    mojibake_pattern = "\\|".join(
+        (
+            chr(0x03A9),
+            chr(0x00B5),
+            chr(0x00E6),
+            chr(0x00C7),
+            chr(0x221E),
+        )
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def runner(command: tuple[str, ...], cwd: Path):
+        del cwd
+        calls.append(command)
+        outputs = {
+            ("git", "status", "--short"): (" M src/jeeves_dap/services/task_runtime_stub.py", "", 0),
+            ("git", "status"): ("On branch main", "", 0),
+            ("git", "log", "--oneline", "-5"): ("abc123 latest", "", 0),
+            ("git", "diff", "--name-only"): ("src/jeeves_dap/services/task_runtime_stub.py", "", 0),
+            ("git", "diff", "--", "src", "tests", "scripts", ".env.example", ".gitignore"): ("diff", "", 0),
+            ("grep", "-R", "-n", "--include=*.py", type_ignore_pattern, "src", "tests", "scripts"): ("", "", 1),
+            ("grep", "-R", "-n", "--include=*.py", mojibake_pattern, "src", "tests", "scripts"): ("", "", 1),
+            ("git", "ls-files", "--others", "--exclude-standard"): ("", "", 0),
+            ("cat", "AGENTS.md"): ("# AGENTS.md — Jeeves DAP Codex Operating Rules", "", 0),
+        }
+        stdout, stderr, returncode = outputs[command]
+        return type("Result", (), {"command": command, "returncode": returncode, "stdout": stdout, "stderr": stderr})()
+
+    task_runtime = TaskRuntimeStub(
+        RuleEngine(),
+        VerifierStub(),
+        RepoReviewRuntime(command_runner=runner, repo_root=Path.cwd()),
+    )
+    classifier = LLMIntakeClassifier(
+        ModelRouter(build_default_model_routing_config()),
+        StubLLMIntakeClient(
+            result={
+                "message_id": "m1",
+                "primary_intent": "task",
+                "items": [{"type": "task", "text": "Проверить репозиторий"}],
+            }
+        ),
+    )
+    program_repository = InMemoryAgentProgramVersionRepository()
+    program_service = AgentProgramService(program_repository)
+    active_version = program_service.create_initial_version("v1", datetime.now(UTC))
+    candidate = program_service.create_rule_candidate(
+        candidate_id="c1",
+        source_message_id="m0",
+        source_episode_id="e1",
+        text="Показывай понимание",
+        key="show_understanding_before_execution",
+        scope="all_tasks",
+    )
+    program_service.confirm_rule_candidate(
+        active_version=active_version,
+        candidate=candidate,
+        new_version_id="v2",
+        new_rule_id="r1",
+        created_at=datetime.now(UTC),
+    )
+    client = TestClient(
+        create_app(
+            classifier=classifier,
+            program_version_repository=program_repository,
+            task_runtime=task_runtime,
+        )
+    )
+    episode_id = create_episode_and_return_id(client)
+
+    review_response = client.post("/api/turns", json={"episode_id": episode_id, "text": "Проверь репозиторий"})
+    assert review_response.status_code == 200
+    assert review_response.json()["episode_state"] == "pending_understanding_review"
+
+    confirm_response = client.post("/api/turns", json={"episode_id": episode_id, "text": "да"})
+
+    assert confirm_response.status_code == 200
+    payload = confirm_response.json()
+    assert payload["episode_state"] == "open"
+    assert payload["runtime_result"]["execution_mode"] == "read_only_repo_review"
+    assert payload["runtime_result"]["did_execute_real_work"] is True
+    assert "Read-only repository review completed" in payload["assistant_response"]
+    assert "All checks passed." not in payload["assistant_response"]
+    assert ("./scripts/check.sh",) not in calls
 
 
 def test_no_ui_buttons_added() -> None:

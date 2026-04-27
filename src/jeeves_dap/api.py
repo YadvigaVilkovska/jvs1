@@ -340,6 +340,7 @@ def create_app(
     pending_understanding_repository: PendingUnderstandingRepository | None = None,
     unknown_utterance_repository: UnknownUtteranceRepository | None = None,
     deferred_message_repository: DeferredMessageRepository | None = None,
+    task_runtime: TaskRuntimeStub | None = None,
 ) -> FastAPI:
     """Create the API app with in-memory defaults and overridable dependencies for tests."""
 
@@ -373,7 +374,7 @@ def create_app(
         pending_understanding_repository=pending_understanding_repository_dependency,
         unknown_utterance_repository=unknown_utterance_repository_dependency,
         pending_switch_service=pending_switch_service,
-        task_runtime=TaskRuntimeStub(RuleEngine(), VerifierStub()),
+        task_runtime=task_runtime or TaskRuntimeStub(RuleEngine(), VerifierStub()),
     )
 
     app = FastAPI(title="Jeeves DAP API")
